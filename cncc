@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import difflib
+import logging
 import os
 import re
 import sys
@@ -23,6 +25,41 @@ from clang.cindex import (
 FORMAT = '{}:{}:{}: "{}" does not conform to pattern "{}" associated with {}'
 DEFAULT_STYLE = "~/.cncc.style"
 NAMED_KINDS = {kind.name.lower(): kind for kind in CursorKind.get_all_kinds()}
+
+
+class CustomFormatter(logging.Formatter):
+
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    reset = "\x1b[0m"
+    format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
+
+    FORMATS = {
+        logging.DEBUG: grey + format + reset,
+        logging.INFO: grey + format + reset,
+        logging.WARNING: yellow + format + reset,
+        logging.ERROR: red + format + reset,
+        logging.CRITICAL: bold_red + format + reset,
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+
+logger = logging.getLogger("cncc")
+logger.setLevel(logging.DEBUG)
+
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(logging.DEBUG)
+
+ch.setFormatter(CustomFormatter())
+
+logger.addHandler(ch)
 
 
 @dataclass(frozen=True)
@@ -55,48 +92,97 @@ class StyleRule:
         sys.exit("Invalid rule entry")
 
 
-def load_style_rules(style) -> List[StyleRule]:
+class StyleAnalyzer:
+    def __init__(self, file_list: List[str], db_directory: Optional[str] = None) -> None:
+        self.compile_db: CompilationDatabase = None
+        self.rule_db: List[StyleRule] = None
 
-    try:
-        with open(style) as style_file:
-            rules = yaml.safe_load(style_file)
-    except FileNotFoundError:
-        sys.exit(f"Style file {style!r} was not found")
+        if db_directory:
+            self.compile_db = CompilationDatabase.fromDirectory(db_directory)
 
-    try:
-        return [StyleRule.create(rule) for rule in rules]
-    except KeyError as e:
-        print(f"{style}: {e.message} is not a valid CursorKind")
-        suggestions = difflib.get_close_matches(e.message, NAMED_KINDS.keys(), n=1, cutoff=0.8)
-        if suggestions:
-            print(f"Did you mean CursorKind: {suggestions[0]}")
-        sys.exit(1)
+        self.file_list = file_list
 
+    def arguments_for_file(self, filename: str) -> List[str]:
+        if not self.compile_db:
+            return []
 
-def rule_for_node(rule_db, node) -> Optional[StyleRule]:
-    for rule in rule_db:
-        if node.kind == rule.kind:
-            if node.access_specifier is AccessSpecifier.INVALID or rule.access_specifier is None or rule.access_specifier.upper() == node.access_specifier.name:
-                return rule
+        commands = self.compile_db.getCompileCommands(filename)
+        arguments = [arg for cmd in commands for arg in cmd.arguments]
 
-    return None
+        # remove the compiler executable
+        arguments = arguments[1:]
 
+        try:
+            index = arguments.index("--")
+            return arguments[:index]
+        except ValueError:
+            return arguments
 
-def arguments_for_file(compile_db, f: str) -> List[str]:
-    if not compile_db:
-        return []
+    def load_style_rules(self, style) -> None:
 
-    commands = compile_db.getCompileCommands(f)
-    arguments = [arg for cmd in commands for arg in cmd.arguments]
+        try:
+            with open(style) as style_file:
+                rules = yaml.safe_load(style_file)
+        except FileNotFoundError:
+            sys.exit(f"Style file {style!r} was not found")
 
-    # remove the compiler executable
-    arguments = arguments[1:]
+        try:
+            self.rule_db = [StyleRule.create(rule) for rule in rules]
+        except KeyError as e:
+            print(f"{style}: {e.message} is not a valid CursorKind")
+            suggestions = difflib.get_close_matches(e.message, NAMED_KINDS.keys(), n=1, cutoff=0.8)
+            if suggestions:
+                print(f"Did you mean CursorKind: {suggestions[0]}")
+            sys.exit(1)
 
-    try:
-        index = arguments.index("--")
-        return arguments[:index]
-    except ValueError:
-        return arguments
+    def rule_for_node(self, node) -> Optional[StyleRule]:
+        for rule in self.rule_db:
+            if node.kind == rule.kind:
+                if (
+                    node.access_specifier is AccessSpecifier.INVALID
+                    or rule.access_specifier is None
+                    or rule.access_specifier.upper() == node.access_specifier.name
+                ):
+                    return rule
+
+        return None
+
+    def is_invalid(self, node):
+
+        rule = self.rule_for_node(node)
+        if not rule:
+            return False
+
+        spelling = node.spelling
+        if not spelling:
+            return False
+
+        return not rule.regex.match(spelling)
+
+    def is_local(self, node):
+        return node.location.file and node.location.file.name in self.file_list
+
+    def analyze(self, filename):
+        arguments = self.arguments_for_file(filename)
+
+        index = Index.create()
+        unit = index.parse(filename, args=arguments)
+        cursor = unit.cursor
+
+        notify = [node for node in cursor.walk_preorder() if self.is_local(node) and self.is_invalid(node)]
+
+        for node in notify:
+            rule = self.rule_for_node(node)
+
+            msg = FORMAT.format(
+                node.location.file.name,
+                node.location.line,
+                node.location.column,
+                node.displayname,
+                rule.regex.pattern,
+                rule.name,
+            )
+            logger.warning(msg)
 
 
 @click.command()
@@ -107,59 +193,18 @@ def arguments_for_file(compile_db, f: str) -> List[str]:
 def main(style: str, dbdir: str, list_kinds: bool, files: List[str]) -> None:
 
     if list_kinds:
-        for kind in NAMED_KINDS.keys():
+        for kind in sorted(NAMED_KINDS.keys()):
             print(kind)
         sys.exit(0)
 
     if not files:
         sys.exit(0)
 
-    compile_db: CompilationDatabase = None
-    if dbdir:
-        compile_db = CompilationDatabase.fromDirectory(dbdir)
+    analyzer = StyleAnalyzer(file_list=files, db_directory=dbdir)
+    analyzer.load_style_rules(style)
 
-    rule_db = load_style_rules(style)
-
-    def local(node):
-        return node.location.file and node.location.file.name in files
-
-    def invalid(node):
-
-        rule = rule_for_node(rule_db, node)
-        if not rule:
-            return False
-
-        spelling = node.spelling
-        if not spelling:
-            return False
-
-        return not rule.regex.match(spelling)
-
-    for f in files:
-
-        arguments = arguments_for_file(compile_db, f)
-
-        index = Index.create()
-        unit = index.parse(f, args=arguments)
-        cursor = unit.cursor
-
-        notify = [node for node in cursor.walk_preorder() if local(node) and invalid(node)]
-
-        for node in notify:
-
-            rule = rule_for_node(rule_db, node)
-
-            msg = FORMAT.format(
-                node.location.file.name,
-                node.location.line,
-                node.location.column,
-                node.displayname,
-                rule.regex.pattern,
-                rule.name,
-            )
-            print(msg)
-
-    sys.exit(1 if notify else 0)
+    for filename in files:
+        analyzer.analyze(filename)
 
 
 if __name__ == "__main__":
