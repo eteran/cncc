@@ -1,55 +1,113 @@
-#!/usr/bin/env python2
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
-import argparse as A, re as R, sys as S, os.path as P, difflib as X, yaml as Y
-from clang.cindex import Index as I, CursorKind as K, CompilationDatabase as D
+import difflib
+import os
+import re
+import sys
 
-if __name__ == '__main__':
-    parser = A.ArgumentParser(description='Customizable Naming Convention Checker')
-    parser.add_argument('files', help='path to files', metavar='file', nargs='+')
-    parser.add_argument('--style', dest='style', default=P.expanduser('~/.cncc.style'),
-                        help='user-defined style file, defaults to `.cncc.style` in your home directory')
-    parser.add_argument('--dbdir', dest='dbdir',
-                        help='build path is used to read a `compile_commands.json` compile command database')
-    args = parser.parse_args()
+import click
+import yaml
+from clang.cindex import CompilationDatabase, CursorKind, Index
+from typing import List
 
-    compiledb = None
-    if args.dbdir:
-        compiledb = D.fromDirectory(args.dbdir)
+FORMAT = '{}:{}:{}: "{}" does not conform to pattern "{}" associated with {}'
 
-    with open(args.style) as stylefile:
-        rules = Y.safe_load(stylefile)
+"""
+Node:
+[
+'access_specifier', 'availability', 'brief_comment', 'canonical', 'data', 'displayname', 'enum_type', 'enum_value',
+'exception_specification_kind', 'extent', 'from_cursor_result', 'from_location', 'from_result', 'get_arguments', 'get_bitfield_width', 'get_children', 'get_definition',
+'get_field_offsetof', 'get_included_file', 'get_num_template_arguments', 'get_template_argument_kind', 'get_template_argument_type', 'get_template_argument_unsigned_value',
+'get_template_argument_value', 'get_tokens', 'get_usr', 'hash', 'is_abstract_record', 'is_anonymous', 'is_bitfield', 'is_const_method', 'is_converting_constructor', 'is_copy_constructor',
+'is_default_constructor', 'is_default_method', 'is_definition', 'is_move_constructor', 'is_mutable_field', 'is_pure_virtual_method', 'is_scoped_enum', 'is_static_method', 'is_virtual_method',
+'kind', 'lexical_parent', 'linkage', 'location', 'mangled_name', 'objc_type_encoding', 'raw_comment', 'referenced', 'result_type', 'semantic_parent', 'spelling', 'storage_class',
+'tls_kind', 'translation_unit', 'type', 'underlying_typedef_type', 'walk_preorder', 'xdata']
 
-    namedkinds = {kind.name.lower(): kind for kind in K.get_all_kinds()}
+Kind:
+['ADDR_LABEL_EXPR', 'ALIGNED_ATTR', 'ANNOTATE_ATTR', 'ARRAY_SUBSCRIPT_EXPR', 'ASM_LABEL_ATTR', 'ASM_STMT', 'BINARY_OPERATOR', 'BLOCK_EXPR', 'BREAK_STMT', 'CALL_EXPR', 'CASE_STMT', 'CHARACTER_LITERAL',
+'CLASS_DECL', 'CLASS_TEMPLATE', 'CLASS_TEMPLATE_PARTIAL_SPECIALIZATION', 'COMPOUND_ASSIGNMENT_OPERATOR', 'COMPOUND_LITERAL_EXPR', 'COMPOUND_STMT', 'CONDITIONAL_OPERATOR', 'CONSTRUCTOR', 'CONST_ATTR',
+'CONTINUE_STMT', 'CONVERGENT_ATTR', 'CONVERSION_FUNCTION', 'CSTYLE_CAST_EXPR', 'CUDACONSTANT_ATTR', 'CUDADEVICE_ATTR', 'CUDAGLOBAL_ATTR', 'CUDAHOST_ATTR', 'CUDASHARED_ATTR', 'CXX_ACCESS_SPEC_DECL',
+'CXX_BASE_SPECIFIER', 'CXX_BOOL_LITERAL_EXPR', 'CXX_CATCH_STMT', 'CXX_CONST_CAST_EXPR', 'CXX_DELETE_EXPR', 'CXX_DYNAMIC_CAST_EXPR', 'CXX_FINAL_ATTR', 'CXX_FOR_RANGE_STMT', 'CXX_FUNCTIONAL_CAST_EXPR',
+'CXX_METHOD', 'CXX_NEW_EXPR', 'CXX_NULL_PTR_LITERAL_EXPR', 'CXX_OVERRIDE_ATTR', 'CXX_REINTERPRET_CAST_EXPR', 'CXX_STATIC_CAST_EXPR', 'CXX_THIS_EXPR', 'CXX_THROW_EXPR', 'CXX_TRY_STMT', 'CXX_TYPEID_EXPR',
+'CXX_UNARY_EXPR', 'DECL_REF_EXPR', 'DECL_STMT', 'DEFAULT_STMT', 'DESTRUCTOR', 'DLLEXPORT_ATTR', 'DLLIMPORT_ATTR', 'DO_STMT', 'ENUM_CONSTANT_DECL', 'ENUM_DECL', 'FIELD_DECL', 'FLOATING_LITERAL', 'FOR_STMT',
+'FRIEND_DECL', 'FUNCTION_DECL', 'FUNCTION_TEMPLATE', 'GENERIC_SELECTION_EXPR', 'GNU_NULL_EXPR', 'GOTO_STMT', 'IB_ACTION_ATTR', 'IB_OUTLET_ATTR', 'IB_OUTLET_COLLECTION_ATTR', 'IF_STMT', 'IMAGINARY_LITERAL',
+'INCLUSION_DIRECTIVE', 'INDIRECT_GOTO_STMT', 'INIT_LIST_EXPR', 'INTEGER_LITERAL', 'INVALID_CODE', 'INVALID_FILE', 'LABEL_REF', 'LABEL_STMT', 'LAMBDA_EXPR', 'LINKAGE_SPEC', 'MACRO_DEFINITION', 'MACRO_INSTANTIATION',
+'MEMBER_REF', 'MEMBER_REF_EXPR', 'MODULE_IMPORT_DECL', 'MS_ASM_STMT', 'NAMESPACE', 'NAMESPACE_ALIAS', 'NAMESPACE_REF', 'NODUPLICATE_ATTR', 'NOT_IMPLEMENTED', 'NO_DECL_FOUND', 'NULL_STMT', 'OBJC_AT_CATCH_STMT',
+'OBJC_AT_FINALLY_STMT', 'OBJC_AT_SYNCHRONIZED_STMT', 'OBJC_AT_THROW_STMT', 'OBJC_AT_TRY_STMT', 'OBJC_AUTORELEASE_POOL_STMT', 'OBJC_AVAILABILITY_CHECK_EXPR', 'OBJC_BRIDGE_CAST_EXPR', 'OBJC_CATEGORY_DECL',
+'OBJC_CATEGORY_IMPL_DECL', 'OBJC_CLASS_METHOD_DECL', 'OBJC_CLASS_REF', 'OBJC_DYNAMIC_DECL', 'OBJC_ENCODE_EXPR', 'OBJC_FOR_COLLECTION_STMT', 'OBJC_IMPLEMENTATION_DECL', 'OBJC_INSTANCE_METHOD_DECL',
+'OBJC_INTERFACE_DECL', 'OBJC_IVAR_DECL', 'OBJC_MESSAGE_EXPR', 'OBJC_PROPERTY_DECL', 'OBJC_PROTOCOL_DECL', 'OBJC_PROTOCOL_EXPR', 'OBJC_PROTOCOL_REF', 'OBJC_SELECTOR_EXPR', 'OBJC_STRING_LITERAL',
+'OBJC_SUPER_CLASS_REF', 'OBJC_SYNTHESIZE_DECL', 'OBJ_BOOL_LITERAL_EXPR', 'OBJ_SELF_EXPR', 'OMP_ARRAY_SECTION_EXPR', 'OMP_ATOMIC_DIRECTIVE', 'OMP_BARRIER_DIRECTIVE', 'OMP_CANCELLATION_POINT_DIRECTIVE',
+'OMP_CANCEL_DIRECTIVE', 'OMP_CRITICAL_DIRECTIVE', 'OMP_DISTRIBUTE_DIRECTIVE', 'OMP_DISTRIBUTE_PARALLELFOR_DIRECTIVE', 'OMP_DISTRIBUTE_PARALLEL_FOR_SIMD_DIRECTIVE', 'OMP_DISTRIBUTE_SIMD_DIRECTIVE',
+'OMP_FLUSH_DIRECTIVE', 'OMP_FOR_DIRECTIVE', 'OMP_FOR_SIMD_DIRECTIVE', 'OMP_MASTER_DIRECTIVE', 'OMP_ORDERED_DIRECTIVE', 'OMP_PARALLELFORSIMD_DIRECTIVE', 'OMP_PARALLEL_DIRECTIVE', 'OMP_PARALLEL_FOR_DIRECTIVE',
+'OMP_PARALLEL_SECTIONS_DIRECTIVE', 'OMP_SECTIONS_DIRECTIVE', 'OMP_SECTION_DIRECTIVE', 'OMP_SIMD_DIRECTIVE', 'OMP_SINGLE_DIRECTIVE', 'OMP_TARGET_DATA_DIRECTIVE', 'OMP_TARGET_DIRECTIVE', 'OMP_TARGET_ENTER_DATA_DIRECTIVE',
+'OMP_TARGET_EXIT_DATA_DIRECTIVE', 'OMP_TARGET_PARALLELFOR_DIRECTIVE', 'OMP_TARGET_PARALLEL_DIRECTIVE', 'OMP_TARGET_PARALLEL_FOR_SIMD_DIRECTIVE', 'OMP_TARGET_SIMD_DIRECTIVE', 'OMP_TARGET_UPDATE_DIRECTIVE',
+'OMP_TASKGROUP_DIRECTIVE', 'OMP_TASKWAIT_DIRECTIVE', 'OMP_TASKYIELD_DIRECTIVE', 'OMP_TASK_DIRECTIVE', 'OMP_TASK_LOOP_DIRECTIVE', 'OMP_TASK_LOOP_SIMD_DIRECTIVE', 'OMP_TEAMS_DIRECTIVE', 'OMP_TEAMS_DISTRIBUTE_DIRECTIVE',
+'OVERLOADED_DECL_REF', 'OVERLOAD_CANDIDATE', 'PACKED_ATTR', 'PACK_EXPANSION_EXPR', 'PAREN_EXPR', 'PARM_DECL', 'PREPROCESSING_DIRECTIVE', 'PURE_ATTR', 'RETURN_STMT', 'SEH_EXCEPT_STMT', 'SEH_FINALLY_STMT', 'SEH_LEAVE_STMT',
+'SEH_TRY_STMT', 'SIZE_OF_PACK_EXPR', 'STATIC_ASSERT', 'STRING_LITERAL', 'STRUCT_DECL', 'SWITCH_STMT', 'StmtExpr', 'TEMPLATE_NON_TYPE_PARAMETER', 'TEMPLATE_REF', 'TEMPLATE_TEMPLATE_PARAMETER', 'TEMPLATE_TYPE_PARAMETER',
+'TRANSLATION_UNIT', 'TYPEDEF_DECL', 'TYPE_ALIAS_DECL', 'TYPE_ALIAS_TEMPLATE_DECL', 'TYPE_REF', 'UNARY_OPERATOR', 'UNEXPOSED_ATTR', 'UNEXPOSED_DECL', 'UNEXPOSED_EXPR', 'UNEXPOSED_STMT', 'UNION_DECL', 'USING_DECLARATION',
+'USING_DIRECTIVE', 'VARIABLE_REF', 'VAR_DECL', 'VISIBILITY_ATTR', 'WARN_UNUSED_ATTR', 'WARN_UNUSED_RESULT_ATTR',
+'WHILE_STMT', '__class__', '__delattr__', '__dict__', '__dir__', '__doc__', '__eq__', '__format__', '__ge__', '__getattribute__', '__gt__', '__hash__', '__init__', '__init_subclass__', '__le__', '__lt__', '__module__',
+'__ne__', '__new__', '__reduce__', '__reduce_ex__', '__repr__', '__setattr__', '__sizeof__', '__str__', '__subclasshook__', '__weakref__', '_kinds', '_name_map', 'from_id', 'from_param', 'get_all_kinds',
+'is_attribute', 'is_declaration', 'is_expression', 'is_invalid', 'is_preprocessing', 'is_reference', 'is_statement', 'is_translation_unit', 'is_unexposed', 'name', 'value']
+"""
+
+
+@click.command()
+@click.option("--style", default=os.path.expanduser("~/.cncc.style"), help="user-defined style file, defaults to `.cncc.style` in your home directory")
+@click.option("--dbdir", default=None, help="build path is used to read a `compile_commands.json` compile command database")
+@click.argument("files", required=True, nargs=-1)
+def main(style: str, dbdir: str, files: List[str]) -> None:
+    compiledb: CompilationDatabase = None
+    if dbdir:
+        compiledb = CompilationDatabase.fromDirectory(dbdir)
+
+    with open(style) as stylefile:
+        rules = yaml.safe_load(stylefile)
+
+    namedkinds = {kind.name.lower(): kind for kind in CursorKind.get_all_kinds()}
 
     try:
-        ruledb = {namedkinds[kind]: R.compile(pattern) for (kind, pattern) in rules.items()}
+        ruledb = {namedkinds[kind]: re.compile(pattern) for kind, pattern in rules.items()}
     except KeyError as e:
-        S.stderr.write('{}: {} is not a valid CursorKind\n'.format(args.style, e.message))
-        fixit = X.get_close_matches(e.message, namedkinds.keys(), n=1, cutoff=0.8)
+        print(f"{style}: {e.message} is not a valid CursorKind")
+        fixit = difflib.get_close_matches(e.message, namedkinds.keys(), n=1, cutoff=0.8)
         if fixit:
-            S.stderr.write('Did you mean CursorKind: {}\n'.format(fixit[0]))
-        S.exit(1)
+            print(f"Did you mean CursorKind: {fixit[0]}")
+        sys.exit(1)
 
-    check = lambda node: ruledb.get(node.kind)
-    local = lambda node: node.location.file and node.location.file.name in args.files
-    invalid = lambda node: not ruledb[node.kind].match(node.spelling)
+    def check(node):
+        return node.kind in ruledb
 
-    for f in args.files:
+    def local(node):
+        return node.location.file and node.location.file.name in files
+
+    def invalid(node):
+        return not ruledb[node.kind].match(node.spelling)
+
+    for f in files:
         commands = None
         if compiledb:
             commands = compiledb.getCompileCommands(f)
 
-        index = I.create()
+        index = Index.create()
         unit = index.parse(f, args=commands)
         cursor = unit.cursor
 
-        notify = [node for node in cursor.walk_preorder() if check(node) and local(node) and invalid(node)]
+        notify = [node for node in cursor.walk_preorder() if local(node) and check(node) and invalid(node)]
 
         for node in notify:
-            fmt = '{}:{}:{}: "{}" does not conform to pattern "{}" associated with {}\n'
-            msg = fmt.format(node.location.file.name, node.location.line, node.location.column,
-                             node.displayname, ruledb[node.kind].pattern, node.kind.name.lower())
-            S.stderr.write(msg)
+            msg = FORMAT.format(
+                node.location.file.name,
+                node.location.line,
+                node.location.column,
+                node.displayname,
+                ruledb[node.kind].pattern,
+                node.kind.name.lower(),
+            )
+            print(msg)
 
-    S.exit(1 if notify else 0)
+    sys.exit(1 if notify else 0)
+
+
+if __name__ == "__main__":
+    main()
