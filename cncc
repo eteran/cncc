@@ -4,13 +4,16 @@ import difflib
 import os
 import re
 import sys
+from dataclasses import dataclass
+from typing import List
+from re import Pattern
 
 import click
 import yaml
-from clang.cindex import CompilationDatabase, CursorKind, Index
-from typing import List
+from clang.cindex import CompilationDatabase, CursorKind, Index, LibclangError
 
 FORMAT = '{}:{}:{}: "{}" does not conform to pattern "{}" associated with {}'
+DEFAULT_STYLE = "~/.cncc.style"
 
 """
 Node:
@@ -52,42 +55,50 @@ Kind:
 """
 
 
+@dataclass(frozen=True)
+class StyleRule:
+    pattern: Pattern[str] = None
+
+
 @click.command()
-@click.option("--style", default=os.path.expanduser("~/.cncc.style"), help="user-defined style file, defaults to `.cncc.style` in your home directory")
-@click.option("--dbdir", default=None, help="build path is used to read a `compile_commands.json` compile command database")
+@click.option("--style", default=os.path.expanduser(DEFAULT_STYLE), help=f"user-defined style file, defaults to {DEFAULT_STYLE!r}")
+@click.option("--dbdir", default=None, help="build path is used to read a 'compile_commands.json' compile command database")
 @click.argument("files", required=True, nargs=-1)
 def main(style: str, dbdir: str, files: List[str]) -> None:
-    compiledb: CompilationDatabase = None
+    compile_db: CompilationDatabase = None
     if dbdir:
-        compiledb = CompilationDatabase.fromDirectory(dbdir)
-
-    with open(style) as stylefile:
-        rules = yaml.safe_load(stylefile)
-
-    namedkinds = {kind.name.lower(): kind for kind in CursorKind.get_all_kinds()}
+        compile_db = CompilationDatabase.fromDirectory(dbdir)
 
     try:
-        ruledb = {namedkinds[kind]: re.compile(pattern) for kind, pattern in rules.items()}
+        with open(style) as style_file:
+            rules = yaml.safe_load(style_file)
+    except FileNotFoundError:
+        sys.exit(f"Style file {style!r} was not found")
+
+    named_kinds = {kind.name.lower(): kind for kind in CursorKind.get_all_kinds()}
+
+    try:
+        rule_db = {named_kinds[kind]: StyleRule(pattern=re.compile(pattern)) for kind, pattern in rules.items()}
     except KeyError as e:
         print(f"{style}: {e.message} is not a valid CursorKind")
-        fixit = difflib.get_close_matches(e.message, namedkinds.keys(), n=1, cutoff=0.8)
+        fixit = difflib.get_close_matches(e.message, named_kinds.keys(), n=1, cutoff=0.8)
         if fixit:
             print(f"Did you mean CursorKind: {fixit[0]}")
         sys.exit(1)
 
     def check(node):
-        return node.kind in ruledb
+        return node.kind in rule_db
 
     def local(node):
         return node.location.file and node.location.file.name in files
 
     def invalid(node):
-        return not ruledb[node.kind].match(node.spelling)
+        return not rule_db[node.kind].pattern.match(node.spelling)
 
     for f in files:
         commands = None
-        if compiledb:
-            commands = compiledb.getCompileCommands(f)
+        if compile_db:
+            commands = compile_db.getCompileCommands(f)
 
         index = Index.create()
         unit = index.parse(f, args=commands)
@@ -101,7 +112,7 @@ def main(style: str, dbdir: str, files: List[str]) -> None:
                 node.location.line,
                 node.location.column,
                 node.displayname,
-                ruledb[node.kind].pattern,
+                rule_db[node.kind].pattern,
                 node.kind.name.lower(),
             )
             print(msg)
@@ -110,4 +121,7 @@ def main(style: str, dbdir: str, files: List[str]) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except LibclangError as e:
+        sys.exit(e)
