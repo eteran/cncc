@@ -5,18 +5,18 @@
 #  - https://docs.python.org/2/library/re.html#regular-expression-syntax
 
 - kind: class_decl
-  pattern: "^([A-Z][a-z]+)+$"
+  pattern: "([A-Z][a-z]+)+"
 
 - kind: field_decl
-  pattern: "^[a-z_]+$"
+  pattern: "[a-z_]+"
   access_specifier: public
 
 - kind: field_decl
-  pattern: "^[a-z_]+_$"
+  pattern: "[a-z_]+_"
   access_specifier: private
 
 - kind: var_decl
-  pattern: "^[a-z][a-z0-9]*$"
+  pattern: "[a-z][a-z0-9]*"
 
 - kind: namespace
-  pattern: "^[a-z_]+$"
+  pattern: "[a-z_]+"

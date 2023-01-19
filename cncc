@@ -22,7 +22,7 @@ from clang.cindex import (
     LibclangError,
 )
 
-FORMAT = '{}:{}:{}: "{}" does not conform to pattern "{}" associated with {}'
+FORMAT = '{}:{}:{}: "{}" does not conform to pattern "{}" for {}'
 DEFAULT_STYLE = "~/.cncc.style"
 NAMED_KINDS = {kind.name.lower(): kind for kind in CursorKind.get_all_kinds()}
 
@@ -34,7 +34,7 @@ class CustomFormatter(logging.Formatter):
     red = "\x1b[31;20m"
     bold_red = "\x1b[31;1m"
     reset = "\x1b[0m"
-    format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s (%(filename)s:%(lineno)d)"
+    format = "%(levelname)s: %(message)s"
 
     FORMATS = {
         logging.DEBUG: grey + format + reset,
@@ -52,13 +52,9 @@ class CustomFormatter(logging.Formatter):
 
 logger = logging.getLogger("cncc")
 logger.setLevel(logging.DEBUG)
-
-# create console handler with a higher log level
 ch = logging.StreamHandler()
 ch.setLevel(logging.DEBUG)
-
 ch.setFormatter(CustomFormatter())
-
 logger.addHandler(ch)
 
 
@@ -157,7 +153,7 @@ class StyleAnalyzer:
         if not spelling:
             return False
 
-        return not rule.regex.match(spelling)
+        return not rule.regex.fullmatch(spelling)
 
     def is_local(self, node):
         return node.location.file and node.location.file.name in self.file_list
