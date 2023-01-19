@@ -1,37 +1,32 @@
 #include <iostream>
 #include <string>
 
-namespace myNamespace
-{
+namespace myNamespace {
 
-  class myClass
-  {
-  public:
-    void f();
+class myClass {
+public:
+	void foo();
 
-  private:
-    int myMember;
-  };
+private:
+	int myMember;
+};
 
 } // ns
 
-namespace
-{
+namespace {
 
-  struct myStruct
-  {
-    myNamespace::myClass myMember;
+struct myStruct {
+	myNamespace::myClass myMember;
 
-    void g() {}
-  };
+	void bar() {}
+};
 
 } // ns
 
-int main()
-{
-  int decl;
-  int def = 0;
+int main() {
+	int decl;
+	int def = 0;
 
-  myNamespace::myClass a;
-  myStruct b;
+	myNamespace::myClass a;
+	myStruct b;
 }
